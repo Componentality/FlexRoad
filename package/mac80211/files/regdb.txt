@@ -500,6 +500,7 @@ country NL: DFS-ETSI
 	(5170 - 5250 @ 40), (N/A, 20), NO-OUTDOOR
 	(5250 - 5330 @ 40), (N/A, 20), NO-OUTDOOR, DFS
 	(5490 - 5710 @ 40), (N/A, 27), DFS
+	(5842 - 5932 @ 40), (N/A, 27), DFS
 
 country NO: DFS-ETSI
 	(2402 - 2482 @ 40), (N/A, 20)
@@ -579,6 +580,7 @@ country RO: DFS-ETSI
 country RU:
 	(2402 - 2482 @ 40), (N/A, 20)
 	(5735 - 5835 @ 20), (N/A, 30)
+	(5842 - 5932 @ 10), (N/A, 27), DFS
 
 country SA:
 	(2402 - 2482 @ 40), (N/A, 20)
