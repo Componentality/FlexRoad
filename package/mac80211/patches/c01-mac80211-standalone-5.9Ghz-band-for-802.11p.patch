@@ -1,0 +1,224 @@
+From 8b5bc47741e258f1f412502e9357d2260adc8b66 Mon Sep 17 00:00:00 2001
+From: Ildar Abubakirov <ildar.abubakirov@componentality.com>
+Date: Sat, 30 Mar 2013 10:10:57 +0400
+Subject: [PATCH 1/4] mac80211: standalone 5.9Ghz band for 802.11p
+
+* IEEE80211_BAND_DSRC is for new 5.9GHz band
+
+Signed-off-by: Ildar Abubakirov <ildar.abubakirov@componentality.com>
+---
+ include/linux/nl80211.h    |    2 ++
+ include/net/cfg80211.h     |    1 +
+ net/mac80211/cfg.c         |    3 ++-
+ net/mac80211/mlme.c        |    4 +++-
+ net/mac80211/rx.c          |    5 +++--
+ net/mac80211/tx.c          |    1 +
+ net/mac80211/util.c        |    2 +-
+ net/wireless/ibss.c        |    3 ++-
+ net/wireless/util.c        |    5 +++++
+ net/wireless/wext-compat.c |   10 +++++++++-
+ 10 files changed, 29 insertions(+), 7 deletions(-)
+
+diff --git a/include/linux/nl80211.h b/include/linux/nl80211.h
+index b6388ce..b10fe31 100644
+--- a/include/linux/nl80211.h
++++ b/include/linux/nl80211.h
+@@ -2612,11 +2612,13 @@ enum nl80211_tx_rate_attributes {
+  * @NL80211_BAND_2GHZ: 2.4 GHz ISM band
+  * @NL80211_BAND_5GHZ: around 5 GHz band (4.9 - 5.7 GHz)
+  * @NL80211_BAND_60GHZ: around 60 GHz band (58.32 - 64.80 GHz)
++ * @NL80211_BAND_DSRC: around 6GHz band (5.8-5.9 GHz)
+  */
+ enum nl80211_band {
+ 	NL80211_BAND_2GHZ,
+ 	NL80211_BAND_5GHZ,
+ 	NL80211_BAND_60GHZ,
++	NL80211_BAND_DSRC,
+ };
+ 
+ /**
+diff --git a/include/net/cfg80211.h b/include/net/cfg80211.h
+index e5be1d6..ab6aaf3 100644
+--- a/include/net/cfg80211.h
++++ b/include/net/cfg80211.h
+@@ -77,6 +77,7 @@ enum ieee80211_band {
+ 	IEEE80211_BAND_2GHZ = NL80211_BAND_2GHZ,
+ 	IEEE80211_BAND_5GHZ = NL80211_BAND_5GHZ,
+ 	IEEE80211_BAND_60GHZ = NL80211_BAND_60GHZ,
++	IEEE80211_BAND_DSRC = NL80211_BAND_DSRC,
+ 
+ 	/* keep last */
+ 	IEEE80211_NUM_BANDS
+diff --git a/net/mac80211/cfg.c b/net/mac80211/cfg.c
+index 48db135..b5b59cf 100644
+--- a/net/mac80211/cfg.c
++++ b/net/mac80211/cfg.c
+@@ -1683,7 +1683,8 @@ static int ieee80211_change_bss(struct wiphy *wiphy,
+ 	}
+ 
+ 	if (!sdata->vif.bss_conf.use_short_slot &&
+-	    sdata->local->oper_channel->band == IEEE80211_BAND_5GHZ) {
++	    (sdata->local->oper_channel->band == IEEE80211_BAND_5GHZ ||
++		 sdata->local->oper_channel->band == IEEE80211_BAND_DSRC)) {
+ 		sdata->vif.bss_conf.use_short_slot = true;
+ 		changed |= BSS_CHANGED_ERP_SLOT;
+ 	}
+diff --git a/net/mac80211/mlme.c b/net/mac80211/mlme.c
+index 27aebc5..057ed59 100644
+--- a/net/mac80211/mlme.c
++++ b/net/mac80211/mlme.c
+@@ -843,6 +843,7 @@ static void ieee80211_handle_pwr_constr(struct ieee80211_sub_if_data *sdata,
+ 		chan_increment = 1;
+ 		break;
+ 	case IEEE80211_BAND_5GHZ:
++	case IEEE80211_BAND_DSRC:
+ 		chan_increment = 4;
+ 		break;
+ 	}
+@@ -1319,7 +1320,8 @@ static u32 ieee80211_handle_bss_capability(struct ieee80211_sub_if_data *sdata,
+ 	}
+ 
+ 	use_short_slot = !!(capab & WLAN_CAPABILITY_SHORT_SLOT_TIME);
+-	if (sdata->local->oper_channel->band == IEEE80211_BAND_5GHZ)
++	if (sdata->local->oper_channel->band == IEEE80211_BAND_5GHZ ||
++		sdata->local->oper_channel->band == IEEE80211_BAND_DSRC)
+ 		use_short_slot = true;
+ 
+ 	if (use_protection != bss_conf->use_cts_prot) {
+diff --git a/net/mac80211/rx.c b/net/mac80211/rx.c
+index 556dd79..81e1273 100644
+--- a/net/mac80211/rx.c
++++ b/net/mac80211/rx.c
+@@ -169,7 +169,7 @@ ieee80211_add_rx_radiotap_header(struct ieee80211_local *local,
+ 	/* IEEE80211_RADIOTAP_CHANNEL */
+ 	put_unaligned_le16(status->freq, pos);
+ 	pos += 2;
+-	if (status->band == IEEE80211_BAND_5GHZ)
++	if (status->band == IEEE80211_BAND_5GHZ || status->band == IEEE80211_BAND_DSRC)
+ 		put_unaligned_le16(IEEE80211_CHAN_OFDM | IEEE80211_CHAN_5GHZ,
+ 				   pos);
+ 	else if (status->flag & RX_FLAG_HT)
+@@ -2323,7 +2323,8 @@ ieee80211_rx_h_action(struct ieee80211_rx_data *rx)
+ 
+ 		goto queue;
+ 	case WLAN_CATEGORY_SPECTRUM_MGMT:
+-		if (status->band != IEEE80211_BAND_5GHZ)
++		if (status->band != IEEE80211_BAND_5GHZ ||
++			status->band != IEEE80211_BAND_DSRC)
+ 			break;
+ 
+ 		if (sdata->vif.type != NL80211_IFTYPE_STATION)
+diff --git a/net/mac80211/tx.c b/net/mac80211/tx.c
+index e04d3dc..9334799 100644
+--- a/net/mac80211/tx.c
++++ b/net/mac80211/tx.c
+@@ -137,6 +137,7 @@ static __le16 ieee80211_duration(struct ieee80211_tx_data *tx,
+ 			break;
+ 		}
+ 		case IEEE80211_BAND_5GHZ:
++		case IEEE80211_BAND_DSRC:
+ 			if (r->flags & IEEE80211_RATE_MANDATORY_A)
+ 				mrate = r->bitrate;
+ 			break;
+diff --git a/net/mac80211/util.c b/net/mac80211/util.c
+index 3811c58..8794327 100644
+--- a/net/mac80211/util.c
++++ b/net/mac80211/util.c
+@@ -120,7 +120,7 @@ int ieee80211_frame_duration(enum ieee80211_band band, size_t len,
+ 	 * DIV_ROUND_UP() operations.
+ 	 */
+ 
+-	if (band == IEEE80211_BAND_5GHZ || erp) {
++	if (band == IEEE80211_BAND_5GHZ || erp || band == IEEE80211_BAND_DSRC) {
+ 		/*
+ 		 * OFDM:
+ 		 *
+diff --git a/net/wireless/ibss.c b/net/wireless/ibss.c
+index ca5672f..af4d9e6 100644
+--- a/net/wireless/ibss.c
++++ b/net/wireless/ibss.c
+@@ -99,7 +99,8 @@ int __cfg80211_join_ibss(struct cfg80211_registered_device *rdev,
+ 		struct ieee80211_supported_band *sband =
+ 			rdev->wiphy.bands[params->channel->band];
+ 		int j;
+-		u32 flag = params->channel->band == IEEE80211_BAND_5GHZ ?
++		u32 flag = (params->channel->band == IEEE80211_BAND_5GHZ ||
++				params->channel->band == IEEE80211_BAND_DSRC) ?
+ 			IEEE80211_RATE_MANDATORY_A :
+ 			IEEE80211_RATE_MANDATORY_B;
+ 
+diff --git a/net/wireless/util.c b/net/wireless/util.c
+index d87f9d2..ce97d2e 100644
+--- a/net/wireless/util.c
++++ b/net/wireless/util.c
+@@ -2,6 +2,7 @@
+  * Wireless utility functions
+  *
+  * Copyright 2007-2009	Johannes Berg <johannes@sipsolutions.net>
++ * Copyright (c) 2012-2013 Ildar Abubakirov, Componentality Oy
+  */
+ #include <linux/export.h>
+ #include <linux/bitops.h>
+@@ -50,6 +51,9 @@ int ieee80211_channel_to_frequency(int chan, enum ieee80211_band band)
+ 		else
+ 			return 5000 + chan * 5;
+ 		break;
++	case IEEE80211_BAND_DSRC:
++		return 5000 + chan * 5;
++		break;
+ 	case IEEE80211_BAND_60GHZ:
+ 		if (chan < 5)
+ 			return 56160 + chan * 2160;
+@@ -109,6 +113,7 @@ static void set_mandatory_flags_band(struct ieee80211_supported_band *sband,
+ 
+ 	switch (band) {
+ 	case IEEE80211_BAND_5GHZ:
++	case IEEE80211_BAND_DSRC:
+ 		want = 3;
+ 		for (i = 0; i < sband->n_bitrates; i++) {
+ 			if (sband->bitrates[i].bitrate == 60 ||
+diff --git a/net/wireless/wext-compat.c b/net/wireless/wext-compat.c
+index 494379e..71413ef 100644
+--- a/net/wireless/wext-compat.c
++++ b/net/wireless/wext-compat.c
+@@ -26,7 +26,7 @@ int cfg80211_wext_giwname(struct net_device *dev,
+ {
+ 	struct wireless_dev *wdev = dev->ieee80211_ptr;
+ 	struct ieee80211_supported_band *sband;
+-	bool is_ht = false, is_a = false, is_b = false, is_g = false;
++	bool is_ht = false, is_a = false, is_b = false, is_g = false, is_p = false;
+ 
+ 	if (!wdev)
+ 		return -EOPNOTSUPP;
+@@ -37,6 +37,10 @@ int cfg80211_wext_giwname(struct net_device *dev,
+ 		is_ht |= sband->ht_cap.ht_supported;
+ 	}
+ 
++	sband = wdev->wiphy->bands[IEEE80211_BAND_DSRC];
++	if (sband)
++		is_p = true;
++
+ 	sband = wdev->wiphy->bands[IEEE80211_BAND_2GHZ];
+ 	if (sband) {
+ 		int i;
+@@ -53,6 +57,8 @@ int cfg80211_wext_giwname(struct net_device *dev,
+ 	strcpy(name, "IEEE 802.11");
+ 	if (is_a)
+ 		strcat(name, "a");
++	if (is_p)
++		strcat(name, "p");
+ 	if (is_b)
+ 		strcat(name, "b");
+ 	if (is_g)
+@@ -274,6 +280,8 @@ int cfg80211_wext_freq(struct wiphy *wiphy, struct iw_freq *freq)
+ 			return 0;
+ 		if (freq->m > 14)
+ 			band = IEEE80211_BAND_5GHZ;
++		if (freq->m > 171) /* 172-184 */
++			band = IEEE80211_BAND_DSRC;
+ 		return ieee80211_channel_to_frequency(freq->m, band);
+ 	} else {
+ 		int i, div = 1000000;
+-- 
+1.7.7.6
+

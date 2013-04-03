@@ -1,0 +1,411 @@
+From 690226e2def44fc7dcefe5a97979c24cfd6323d4 Mon Sep 17 00:00:00 2001
+From: Ildar Abubakirov <ildar.abubakirov@componentality.com>
+Date: Sat, 30 Mar 2013 10:16:03 +0400
+Subject: [PATCH 3/4] ath5k: support for 802.11p channels
+
+* 172-184 channels within IEEE80211_BAND_DSRC enabled
+
+Signed-off-by: Ildar Abubakirov <ildar.abubakirov@componentality.com>
+---
+ drivers/net/wireless/ath/ath5k/ath5k.h  |    5 ++-
+ drivers/net/wireless/ath/ath5k/base.c   |   72 ++++++++++++++++++++++++------
+ drivers/net/wireless/ath/ath5k/caps.c   |    4 ++
+ drivers/net/wireless/ath/ath5k/debug.c  |    4 ++
+ drivers/net/wireless/ath/ath5k/eeprom.c |    2 +
+ drivers/net/wireless/ath/ath5k/pcu.c    |    4 +-
+ drivers/net/wireless/ath/ath5k/phy.c    |   11 ++++-
+ drivers/net/wireless/ath/ath5k/qcu.c    |   14 ++++--
+ drivers/net/wireless/ath/ath5k/reset.c  |    9 +++-
+ 9 files changed, 100 insertions(+), 25 deletions(-)
+
+diff --git a/drivers/net/wireless/ath/ath5k/ath5k.h b/drivers/net/wireless/ath/ath5k/ath5k.h
+index 3150def..006ead2 100644
+--- a/drivers/net/wireless/ath/ath5k/ath5k.h
++++ b/drivers/net/wireless/ath/ath5k/ath5k.h
+@@ -1,6 +1,7 @@
+ /*
+  * Copyright (c) 2004-2007 Reyk Floeter <reyk@openbsd.org>
+  * Copyright (c) 2006-2007 Nick Kossifidis <mickflemm@gmail.com>
++ * Copyright (c) 2012-2013 Ildar Abubakirov, Componentality Oy
+  *
+  * Permission to use, copy, modify, and distribute this software for any
+  * purpose with or without fee is hereby granted, provided that the above
+@@ -439,6 +440,7 @@ enum ath5k_radio {
+  * @AR5K_MODE_11A: 802.11a
+  * @AR5K_MODE_11B: 802.11b
+  * @AR5K_MODE_11G: 801.11g
++ * @AR5K_MODE_11P: 801.11p extends .11a
+  * @AR5K_MODE_MAX: Used for boundary checks
+  *
+  * Do not change the order here, we use these as
+@@ -448,7 +450,8 @@ enum ath5k_driver_mode {
+ 	AR5K_MODE_11A		=	0,
+ 	AR5K_MODE_11B		=	1,
+ 	AR5K_MODE_11G		=	2,
+-	AR5K_MODE_MAX		=	3
++	AR5K_MODE_11P		=	3,
++	AR5K_MODE_MAX		=	4
+ };
+ 
+ /**
+diff --git a/drivers/net/wireless/ath/ath5k/base.c b/drivers/net/wireless/ath/ath5k/base.c
+index 89cb8d6..20b33fa 100644
+--- a/drivers/net/wireless/ath/ath5k/base.c
++++ b/drivers/net/wireless/ath/ath5k/base.c
+@@ -4,6 +4,7 @@
+  * Copyright (c) 2006 Devicescape Software, Inc.
+  * Copyright (c) 2007 Jiri Slaby <jirislaby@gmail.com>
+  * Copyright (c) 2007 Luis R. Rodriguez <mcgrof@winlab.rutgers.edu>
++ * Copyright (c) 2012-2013 Ildar Abubakirov, Componentality Oy
+  *
+  * All rights reserved.
+  *
+@@ -267,19 +268,32 @@ static bool ath5k_is_standard_channel(short chan, enum ieee80211_band band)
+ #else
+ static bool ath5k_is_standard_channel(short chan, enum ieee80211_band band)
+ {
+-	if (band == IEEE80211_BAND_2GHZ && chan <= 14)
+-		return true;
++	/* 802.11p operations */
++	switch (band) {
++		case IEEE80211_BAND_2GHZ:
++			if (band == IEEE80211_BAND_2GHZ && chan <= 14)
++				return true;
++		case IEEE80211_BAND_5GHZ:
++			return	/* UNII 1,2 */
++				(((chan & 3) == 0 && chan >= 36 && chan <= 64) ||
++				 /* midband */
++				 ((chan & 3) == 0 && chan >= 100 && chan <= 140) ||
++				 /* UNII-3 */
++				 ((chan & 3) == 1 && chan >= 149 && chan <= 165) ||
++				 /* 802.11j 5.030-5.080 GHz (20MHz) */
++				 (chan == 8 || chan == 12 || chan == 16) ||
++				 /* 802.11j 4.9GHz (20MHz) */
++				 (chan == 184 || chan == 188 || chan == 192 || chan == 196));
++			break;
++		case IEEE80211_BAND_DSRC:
++			if((!(chan & 1)) && chan >=172 && chan <= 184)
++				return true;
++			break;
++		default:
++			break;
++	}
+ 
+-	return	/* UNII 1,2 */
+-		(((chan & 3) == 0 && chan >= 36 && chan <= 64) ||
+-		/* midband */
+-		((chan & 3) == 0 && chan >= 100 && chan <= 140) ||
+-		/* UNII-3 */
+-		((chan & 3) == 1 && chan >= 149 && chan <= 165) ||
+-		/* 802.11j 5.030-5.080 GHz (20MHz) */
+-		(chan == 8 || chan == 12 || chan == 16) ||
+-		/* 802.11j 4.9GHz (20MHz) */
+-		(chan == 184 || chan == 188 || chan == 192 || chan == 196));
++	return false;
+ }
+ #endif
+ 
+@@ -289,18 +303,24 @@ ath5k_setup_channels(struct ath5k_hw *ah, struct ieee80211_channel *channels,
+ {
+ 	unsigned int count, size, freq, ch;
+ 	enum ieee80211_band band;
++	unsigned int _mode = mode;
+ 
+ 	switch (mode) {
+ 	case AR5K_MODE_11A:
+ 		/* 1..220, but 2GHz frequencies are filtered by check_channel */
+-		size = 220;
++		size = 200;
+ 		band = IEEE80211_BAND_5GHZ;
+ 		break;
+ 	case AR5K_MODE_11B:
+ 	case AR5K_MODE_11G:
+-		size = 26;
++		size = 70;
+ 		band = IEEE80211_BAND_2GHZ;
+ 		break;
++	case AR5K_MODE_11P:
++		size = 200;
++		band = IEEE80211_BAND_DSRC;
++		_mode = AR5K_MODE_11A;
++		break;
+ 	default:
+ 		ATH5K_WARN(ah, "bad mode, not copying channels\n");
+ 		return 0;
+@@ -316,7 +336,7 @@ ath5k_setup_channels(struct ath5k_hw *ah, struct ieee80211_channel *channels,
+ 		/* Write channel info, needed for ath5k_channel_ok() */
+ 		channels[count].center_freq = freq;
+ 		channels[count].band = band;
+-		channels[count].hw_value = mode;
++		channels[count].hw_value = _mode;
+ 
+ 		/* Check if channel is supported by the chipset */
+ 		if (!ath5k_channel_ok(ah, &channels[count]))
+@@ -421,6 +441,27 @@ ath5k_setup_bands(struct ieee80211_hw *hw)
+ 					AR5K_MODE_11A, max_c);
+ 
+ 		hw->wiphy->bands[IEEE80211_BAND_5GHZ] = sband;
++
++		count_c = sband->n_channels;
++		max_c -= count_c;
++	}
++	ath5k_setup_rate_idx(ah, sband);
++
++	/* 5.9GHz band, P mode */
++	if (test_bit(AR5K_MODE_11P, ah->ah_capabilities.cap_mode)) {
++		sband = &ah->sbands[IEEE80211_BAND_DSRC];
++		sband->band = IEEE80211_BAND_DSRC;
++		sband->bitrates = &ah->rates[IEEE80211_BAND_DSRC][0];
++
++		memcpy(sband->bitrates, &ath5k_rates[4],
++		       sizeof(struct ieee80211_rate) * 8);
++		sband->n_bitrates = 8;
++
++		sband->channels = &ah->channels[count_c];
++		sband->n_channels = ath5k_setup_channels(ah, sband->channels,
++					AR5K_MODE_11P, max_c);
++
++		hw->wiphy->bands[IEEE80211_BAND_DSRC] = sband;
+ 	}
+ 	ath5k_setup_rate_idx(ah, sband);
+ 
+@@ -2880,6 +2921,7 @@ ath5k_init(struct ieee80211_hw *hw)
+ 	 * on settings like the phy mode and regulatory
+ 	 * domain restrictions.
+ 	 */
++
+ 	ret = ath5k_setup_bands(hw);
+ 	if (ret) {
+ 		ATH5K_ERR(ah, "can't get channels\n");
+diff --git a/drivers/net/wireless/ath/ath5k/caps.c b/drivers/net/wireless/ath/ath5k/caps.c
+index 994169a..d54ed1a 100644
+--- a/drivers/net/wireless/ath/ath5k/caps.c
++++ b/drivers/net/wireless/ath/ath5k/caps.c
+@@ -2,6 +2,7 @@
+  * Copyright (c) 2004-2008 Reyk Floeter <reyk@openbsd.org>
+  * Copyright (c) 2006-2008 Nick Kossifidis <mickflemm@gmail.com>
+  * Copyright (c) 2007-2008 Jiri Slaby <jirislaby@gmail.com>
++ * Copyright (c) 2012-2013 Ildar Abubakirov, Componentality Oy
+  *
+  * Permission to use, copy, modify, and distribute this software for any
+  * purpose with or without fee is hereby granted, provided that the above
+@@ -74,6 +75,9 @@ int ath5k_hw_set_capabilities(struct ath5k_hw *ah)
+ 
+ 			/* Set supported modes */
+ 			__set_bit(AR5K_MODE_11A, caps->cap_mode);
++
++			/* for caps->cap_range.range_5ghz_max > 5840 MHz */
++			__set_bit(AR5K_MODE_11P, caps->cap_mode);
+ 		}
+ 
+ 		/* Enable  802.11b if a 2GHz capable radio (2111/5112) is
+diff --git a/drivers/net/wireless/ath/ath5k/debug.c b/drivers/net/wireless/ath/ath5k/debug.c
+index 2393d61..9a168f6 100644
+--- a/drivers/net/wireless/ath/ath5k/debug.c
++++ b/drivers/net/wireless/ath/ath5k/debug.c
+@@ -1,5 +1,6 @@
+ /*
+  * Copyright (c) 2007-2008 Bruno Randolf <bruno@thinktube.com>
++ * Copyright (c) 2012-2013 Ildar Abubakirov, Componentality Oy
+  *
+  *  This file is free software: you may copy, redistribute and/or modify it
+  *  under the terms of the GNU General Public License as published by the
+@@ -1028,6 +1029,9 @@ ath5k_debug_dump_bands(struct ath5k_hw *ah)
+ 		case IEEE80211_BAND_2GHZ:
+ 			strcpy(bname, "2 GHz");
+ 			break;
++		case IEEE80211_BAND_DSRC:
++			strcpy(bname, "5.9 GHz DSRC");
++			break;
+ 		case IEEE80211_BAND_5GHZ:
+ 			strcpy(bname, "5 GHz");
+ 			break;
+diff --git a/drivers/net/wireless/ath/ath5k/eeprom.c b/drivers/net/wireless/ath/ath5k/eeprom.c
+index e6b8ec8..7f0aacd 100644
+--- a/drivers/net/wireless/ath/ath5k/eeprom.c
++++ b/drivers/net/wireless/ath/ath5k/eeprom.c
+@@ -2,6 +2,7 @@
+  * Copyright (c) 2004-2008 Reyk Floeter <reyk@openbsd.org>
+  * Copyright (c) 2006-2009 Nick Kossifidis <mickflemm@gmail.com>
+  * Copyright (c) 2008-2009 Felix Fietkau <nbd@openwrt.org>
++ * Copyright (c) 2012-2013 Ildar Abubakirov, Componentality Oy
+  *
+  * Permission to use, copy, modify, and distribute this software for any
+  * purpose with or without fee is hereby granted, provided that the above
+@@ -1785,6 +1786,7 @@ ath5k_eeprom_mode_from_channel(struct ieee80211_channel *channel)
+ {
+ 	switch (channel->hw_value) {
+ 	case AR5K_MODE_11A:
++	case AR5K_MODE_11P:
+ 		return AR5K_EEPROM_MODE_11A;
+ 	case AR5K_MODE_11G:
+ 		return AR5K_EEPROM_MODE_11G;
+diff --git a/drivers/net/wireless/ath/ath5k/pcu.c b/drivers/net/wireless/ath/ath5k/pcu.c
+index 1f16b42..a8f8a34 100644
+--- a/drivers/net/wireless/ath/ath5k/pcu.c
++++ b/drivers/net/wireless/ath/ath5k/pcu.c
+@@ -5,6 +5,7 @@
+  * Copyright (c) 2007-2008 Luis Rodriguez <mcgrof@winlab.rutgers.edu>
+  * Copyright (c) 2007-2008 Pavel Roskin <proski@gnu.org>
+  * Copyright (c) 2007-2008 Jiri Slaby <jirislaby@gmail.com>
++ * Copyright (c) 2012-2013 Ildar Abubakirov, Componentality Oy
+  *
+  * Permission to use, copy, modify, and distribute this software for any
+  * purpose with or without fee is hereby granted, provided that the above
+@@ -219,7 +220,8 @@ ath5k_hw_get_default_sifs(struct ath5k_hw *ah)
+ 	case AR5K_BWMODE_DEFAULT:
+ 		sifs = AR5K_INIT_SIFS_DEFAULT_BG;
+ 	default:
+-		if (channel->band == IEEE80211_BAND_5GHZ)
++		if (channel->band == IEEE80211_BAND_5GHZ ||
++				channel->band == IEEE80211_BAND_DSRC)
+ 			sifs = AR5K_INIT_SIFS_DEFAULT_A;
+ 		break;
+ 	}
+diff --git a/drivers/net/wireless/ath/ath5k/phy.c b/drivers/net/wireless/ath/ath5k/phy.c
+index fc1622e..28fda6b 100644
+--- a/drivers/net/wireless/ath/ath5k/phy.c
++++ b/drivers/net/wireless/ath/ath5k/phy.c
+@@ -3,6 +3,7 @@
+  * Copyright (c) 2006-2009 Nick Kossifidis <mickflemm@gmail.com>
+  * Copyright (c) 2007-2008 Jiri Slaby <jirislaby@gmail.com>
+  * Copyright (c) 2008-2009 Felix Fietkau <nbd@openwrt.org>
++ * Copyright (c) 2012-2013 Ildar Abubakirov, Componentality Oy
+  *
+  * Permission to use, copy, modify, and distribute this software for any
+  * purpose with or without fee is hereby granted, provided that the above
+@@ -97,6 +98,7 @@ ath5k_hw_radio_revision(struct ath5k_hw *ah, enum ieee80211_band band)
+ 		ath5k_hw_reg_write(ah, AR5K_PHY_SHIFT_2GHZ, AR5K_PHY(0));
+ 		break;
+ 	case IEEE80211_BAND_5GHZ:
++	case IEEE80211_BAND_DSRC:
+ 		ath5k_hw_reg_write(ah, AR5K_PHY_SHIFT_5GHZ, AR5K_PHY(0));
+ 		break;
+ 	default:
+@@ -144,7 +146,8 @@ ath5k_channel_ok(struct ath5k_hw *ah, struct ieee80211_channel *channel)
+ 		if ((freq >= ah->ah_capabilities.cap_range.range_2ghz_min) &&
+ 		    (freq <= ah->ah_capabilities.cap_range.range_2ghz_max))
+ 			return true;
+-	} else if (channel->band == IEEE80211_BAND_5GHZ)
++	} else if (channel->band == IEEE80211_BAND_5GHZ ||
++			channel->band == IEEE80211_BAND_DSRC)
+ 		if ((freq >= ah->ah_capabilities.cap_range.range_5ghz_min) &&
+ 		    (freq <= ah->ah_capabilities.cap_range.range_5ghz_max))
+ 			return true;
+@@ -947,6 +950,7 @@ ath5k_hw_rfregs_init(struct ath5k_hw *ah,
+ 
+ 	/* RF5111 always needs OB/DB for 5GHz, even if we use 2GHz */
+ 	} else if ((channel->band == IEEE80211_BAND_5GHZ) ||
++			(channel->band == IEEE80211_BAND_DSRC) ||
+ 			(ah->ah_radio == AR5K_RF5111)) {
+ 
+ 		/* For 11a, Turbo and XR we need to choose
+@@ -1985,7 +1989,8 @@ ath5k_hw_set_spur_mitigation_filter(struct ath5k_hw *ah,
+ 			symbol_width = AR5K_SPUR_SYMBOL_WIDTH_BASE_100Hz / 4;
+ 			break;
+ 		default:
+-			if (channel->band == IEEE80211_BAND_5GHZ) {
++			if (channel->band == IEEE80211_BAND_5GHZ ||
++				channel->band == IEEE80211_BAND_DSRC) {
+ 				/* Both sample_freq and chip_freq are 40MHz */
+ 				spur_delta_phase = (spur_offset << 17) / 25;
+ 				spur_freq_sigma_delta =
+@@ -2692,6 +2697,7 @@ ath5k_get_rate_pcal_data(struct ath5k_hw *ah,
+ 
+ 	switch (channel->hw_value) {
+ 	case AR5K_MODE_11A:
++	case AR5K_MODE_11P:
+ 		rpinfo = ee->ee_rate_tpwr_a;
+ 		mode = AR5K_EEPROM_MODE_11A;
+ 		break;
+@@ -2790,6 +2796,7 @@ ath5k_get_max_ctl_power(struct ath5k_hw *ah,
+ 
+ 	switch (channel->hw_value) {
+ 	case AR5K_MODE_11A:
++	case AR5K_MODE_11P:
+ 		if (ah->ah_bwmode == AR5K_BWMODE_40MHZ)
+ 			ctl_mode |= AR5K_CTL_TURBO;
+ 		else
+diff --git a/drivers/net/wireless/ath/ath5k/qcu.c b/drivers/net/wireless/ath/ath5k/qcu.c
+index fbe1add..40aca69 100644
+--- a/drivers/net/wireless/ath/ath5k/qcu.c
++++ b/drivers/net/wireless/ath/ath5k/qcu.c
+@@ -1,6 +1,7 @@
+ /*
+  * Copyright (c) 2004-2008 Reyk Floeter <reyk@openbsd.org>
+  * Copyright (c) 2006-2008 Nick Kossifidis <mickflemm@gmail.com>
++ * Copyright (c) 2012-2013 Ildar Abubakirov, Componentality Oy
+  *
+  * Permission to use, copy, modify, and distribute this software for any
+  * purpose with or without fee is hereby granted, provided that the above
+@@ -603,10 +604,15 @@ int ath5k_hw_set_ifs_intervals(struct ath5k_hw *ah, unsigned int slot_time)
+ 	 *
+ 	 * Also we have different lowest rate for 802.11a
+ 	 */
+-	if (channel->band == IEEE80211_BAND_5GHZ)
+-		band = IEEE80211_BAND_5GHZ;
+-	else
+-		band = IEEE80211_BAND_2GHZ;
++	switch (channel->band) {
++		case IEEE80211_BAND_5GHZ:
++		case IEEE80211_BAND_DSRC:
++			band = IEEE80211_BAND_5GHZ;
++			break;
++		default:
++			band = IEEE80211_BAND_2GHZ;
++			break;
++	}
+ 
+ 	rate = &ah->sbands[band].bitrates[0];
+ 	ack_tx_time = ath5k_hw_get_frame_duration(ah, band, 10, rate, false);
+diff --git a/drivers/net/wireless/ath/ath5k/reset.c b/drivers/net/wireless/ath/ath5k/reset.c
+index df05bfe..f120690 100644
+--- a/drivers/net/wireless/ath/ath5k/reset.c
++++ b/drivers/net/wireless/ath/ath5k/reset.c
+@@ -4,6 +4,7 @@
+  * Copyright (c) 2007-2008 Luis Rodriguez <mcgrof@winlab.rutgers.edu>
+  * Copyright (c) 2007-2008 Pavel Roskin <proski@gnu.org>
+  * Copyright (c) 2007-2008 Jiri Slaby <jirislaby@gmail.com>
++ * Copyright (c) 2012-2013 Ildar Abubakirov, Componentality Oy
+  *
+  * Permission to use, copy, modify, and distribute this software for any
+  * purpose with or without fee is hereby granted, provided that the above
+@@ -142,6 +143,7 @@ ath5k_hw_init_core_clock(struct ath5k_hw *ah)
+ 	 */
+ 	switch (channel->hw_value) {
+ 	case AR5K_MODE_11A:
++	case AR5K_MODE_11P:
+ 		clock = 40;
+ 		break;
+ 	case AR5K_MODE_11B:
+@@ -773,7 +775,8 @@ ath5k_hw_nic_wakeup(struct ath5k_hw *ah, struct ieee80211_channel *channel)
+ 				else
+ 					mode |= AR5K_PHY_MODE_MOD_DYN;
+ 			}
+-		} else if (channel->band == IEEE80211_BAND_5GHZ) {
++		} else if (channel->band == IEEE80211_BAND_5GHZ ||
++				channel->band == IEEE80211_BAND_DSRC) {
+ 			mode |= (AR5K_PHY_MODE_FREQ_5GHZ |
+ 				 AR5K_PHY_MODE_MOD_OFDM);
+ 
+@@ -908,7 +911,8 @@ ath5k_hw_tweak_initval_settings(struct ath5k_hw *ah,
+ 		u32 data;
+ 		ath5k_hw_reg_write(ah, AR5K_PHY_CCKTXCTL_WORLD,
+ 				AR5K_PHY_CCKTXCTL);
+-		if (channel->band == IEEE80211_BAND_5GHZ)
++		if (channel->band == IEEE80211_BAND_5GHZ ||
++			channel->band == IEEE80211_BAND_DSRC)
+ 			data = 0xffb81020;
+ 		else
+ 			data = 0xffb80d20;
+@@ -1200,6 +1204,7 @@ ath5k_hw_reset(struct ath5k_hw *ah, enum nl80211_iftype op_mode,
+ 	mode = channel->hw_value;
+ 	switch (mode) {
+ 	case AR5K_MODE_11A:
++	case AR5K_MODE_11P:
+ 		break;
+ 	case AR5K_MODE_11G:
+ 		if (ah->ah_version <= AR5K_AR5211) {
+-- 
+1.7.7.6
+
